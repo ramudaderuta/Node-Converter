@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>节点信息转换器</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/layui/2.7.6/css/layui.min.css">
+</head>
+<body>
+    <div class="layui-container">
+        <h1 class="layui-text">节点信息转换器</h1>
+        <form class="layui-form">
+            <div class="layui-form-item">
+                <label class="layui-form-label">输入节点</label>
+                <div class="layui-input-block">
+                    <textarea id="node_input" class="layui-textarea" placeholder="请输入节点信息，每行一个"></textarea>
+                </div>
+            </div>
+        </form>
+        <div class="layui-form-item">
+            <div class="layui-input-block">
+                <button type="button" class="layui-btn" onclick="convertNodes()">转换</button>
+                <button type="button" class="layui-btn layui-btn-primary" onclick="clearTextAreas()">清除</button>
+                <button type="button" class="layui-btn layui-btn-normal" onclick="copyAllNodes()">复制全部转换节点</button>
+            </div>
+        </div>
+        <div class="result-area">
+            <h2 class="layui-text">转换结果</h2>
+            <table id="resultTable" class="layui-table">
+                <thead>
+                    <tr>
+                        <th>序号</th>
+                        <th>转换结果</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        var layer; // 声明 layer 变量为全局
+
+        // 初始化Layui
+        layui.use(['layer'], function() {
+            layer = layui.layer;
+        });
+
+        // 节点解析函数
+        function parseNodeInput(node_input) {
+            node_input = node_input.replace(/\n/g, ' ').replace(/\r/g, ' ');
+            node_input = node_input.replace(/\s+/g, ' ');
+            const nodes = node_input.match(/\{[^}]*\}/g) || [];
+            const parsed_nodes = [];
+
+            nodes.forEach(node => {
+                node = node.trim().replace(/^{|}$/g, '');
+                if (!node) return;
+
+                let node_dict = {};
+                const items = node.split(/,\s*(?![^{}]*\})/);
+                
+                items.forEach(item => {
+                    if (!item.includes(':')) return;
+                    let [key, value] = item.split(/:\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/, 2);
+                    key = key.trim().replace(/^"|"$/g, '');
+                    value = value.trim().replace(/^"|"$/g, '');
+                    
+                    if (key === 'ws-opts') {
+                        const ws_opts_items = value.match(/\w+:\s*[^,{}]+/g) || [];
+                        ws_opts_items.forEach(ws_item => {
+                            let [ws_key, ws_value] = ws_item.split(/:\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/, 2);
+                            ws_key = ws_key.trim().replace(/^"|"$/g, '');
+                            ws_value = ws_value.trim().replace(/^"|"$/g, '');
+
+                            if (ws_key === 'path') {
+                                node_dict['ws-opts.path'] = ws_value;
+                            } else if (ws_key === 'headers') {
+                                const headers_items = ws_value.match(/\w+:\s*[^,{}]+/g) || [];
+                                headers_items.forEach(header => {
+                                    let [h_key, h_value] = header.split(/:\s*(?=(?:[^"]*"[^"]*")*[^"]*$)/, 2);
+                                    h_key = h_key.trim().replace(/^"|"$/g, '');
+                                    h_value = h_value.trim().replace(/^"|"$/g, '');
+                                    node_dict[`ws-opts.headers.${h_key}`] = h_value;
+                                });
+                            }
+                        });
+                        return;
+                    }
+
+                    node_dict[key] = value;
+                });
+
+                if (node_dict.port) node_dict.port = parseInt(node_dict.port);
+                if (node_dict.alterId) node_dict.alterId = parseInt(node_dict.alterId);
+
+                if (node_dict.name && node_dict.server && node_dict.type) {
+                    parsed_nodes.push(node_dict);
+                }
+            });
+
+            return parsed_nodes;
+        }
+
+        // 转换为VMess
+        function convertToVmess(node) {
+            try {
+                const vmess_node = {
+                    v: "2",
+                    ps: node.name,
+                    add: node.server,
+                    port: String(node.port),
+                    id: String(node.uuid),
+                    aid: String(node.alterId || 0),
+                    scy: node.cipher || 'auto',
+                    net: node.network || 'tcp',
+                    type: "none",
+                    host: node['ws-opts.headers.Host'] || node.servername || "",
+                    path: node['ws-opts.path'] || "",
+                    tls: node.tls ? "tls" : ""
+                };
+
+                const base64String = btoa(JSON.stringify(vmess_node));
+                return `vmess://${base64String}`;
+            } catch (e) {
+                return `Error in VMess conversion: ${e.message}`;
+            }
+        }
+
+        // 转换为VLess
+        function convertToVless(node) {
+            try {
+                const params = [];
+                if (node.tls) params.push("security=tls");
+                if (node.flow) params.push(`flow=${node.flow}`);
+                if (node.servername) params.push(`sni=${node.servername}`);
+                if (node['ws-opts.path']) params.push(`path=${node['ws-opts.path']}`);
+                if (node['ws-opts.headers.Host']) params.push(`host=${node['ws-opts.headers.Host']}`);
+                if (node['client-fingerprint']) params.push(`fp=${node['client-fingerprint']}`);
+
+                const paramStr = params.length > 0 ? `?${params.join('&')}` : '';
+                return `vless://${node.uuid}@${node.server}:${node.port}${paramStr}#${node.name}`;
+            } catch (e) {
+                return `Error in VLess conversion: ${e.message}`;
+            }
+        }
+
+        // 转换为Trojan
+        function convertToTrojan(node) {
+            try {
+                return `trojan://${node.password}@${node.server}:${node.port}?sni=${node.sni || ''}#${node.name}`;
+            } catch (e) {
+                return `Error in Trojan conversion: ${e.message}`;
+            }
+        }
+
+        // 转换为Shadowsocks
+        function convertToSS(node) {
+            try {
+                return `ss://${node.cipher}:${node.password}@${node.server}:${node.port}#${node.name}`;
+            } catch (e) {
+                return `Error in Shadowsocks conversion: ${e.message}`;
+            }
+        }
+
+        // 转换为Hysteria2
+        function convertToHysteria2(node) {
+            try {
+                return `hysteria2://${node.password}@${node.server}:${node.port}?auth=${node.auth || ''}&skip-cert-verify=${String(node['skip-cert-verify']).toLowerCase()}&udp=${String(node.udp).toLowerCase()}#${node.name}`;
+            } catch (e) {
+                return `Error in Hysteria2 conversion: ${e.message}`;
+            }
+        }
+
+        // 主转换函数
+        function convertNodes() {
+            const node_input = document.getElementById("node_input").value;
+            const nodes = parseNodeInput(node_input);
+            const resultTable = document.getElementById("resultTable").getElementsByTagName('tbody')[0];
+            resultTable.innerHTML = ''; // 清空之前的结果
+
+            nodes.forEach((node, index) => {
+                let result;
+                switch (node.type) {
+                    case 'ss':
+                        result = convertToSS(node);
+                        break;
+                    case 'vmess':
+                        result = convertToVmess(node);
+                        break;
+                    case 'vless':
+                        result = convertToVless(node);
+                        break;
+                    case 'trojan':
+                        result = convertToTrojan(node);
+                        break;
+                    case 'hysteria2':
+                        result = convertToHysteria2(node);
+                        break;
+                    default:
+                        result = `Unknown node type: ${node.type}`;
+                        break;
+                }
+
+                const row = resultTable.insertRow();
+                row.insertCell(0).textContent = index + 1; // 序号
+                row.insertCell(1).textContent = result; // 转换结果
+                row.insertCell(2).innerHTML = `<button class="layui-btn layui-btn-xs" onclick="copyToClipboard('${result}')">复制</button>`; // 操作
+            });
+        }
+
+        // 清除文本区域
+        function clearTextAreas() {
+            document.getElementById("node_input").value = "";
+            document.getElementById("resultTable").getElementsByTagName('tbody')[0].innerHTML = '';
+        }
+
+        // 复制单个转换结果到剪贴板
+        function copyToClipboard(text) {
+            const tempInput = document.createElement("input");
+            tempInput.value = text;
+            document.body.appendChild(tempInput);
+            tempInput.select();
+            document.execCommand("copy");
+            document.body.removeChild(tempInput);
+            layer.msg('已复制到剪贴板'); 
+        }
+
+        // 复制全部转换节点
+        function copyAllNodes() {
+            const resultTable = document.getElementById("resultTable").getElementsByTagName('tbody')[0];
+            const rows = resultTable.getElementsByTagName('tr');
+            let allResults = [];
+
+            for (let row of rows) {
+                const cellResult = row.cells[1].textContent;
+                allResults.push(cellResult);
+            }
+
+            const resultText = allResults.join('\n');
+            navigator.clipboard.writeText(resultText).then(function() {
+                layer.msg('全部转换节点已复制到剪贴板'); 
+            }, function(err) {
+                layer.msg('复制失败: ' + err); 
+            });
+        }
+    </script>
+</body>
+</html>
